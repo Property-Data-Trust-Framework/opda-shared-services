@@ -1,0 +1,111 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-west-2
+  TF_VERSION: "1.9.8"
+  ECR_REPO_NAME: opda-shared-services
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: dev
+
+    env:
+      TF_BACKEND_KEY: opda-shared-services/terraform.tfstate
+      TF_VAR_environment: dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        run: |
+          BUCKET="ops-terraform-state-$(aws sts get-caller-identity --query Account --output text)"
+          terraform init \
+            -backend-config="bucket=$BUCKET" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="key=${{ env.TF_BACKEND_KEY }}"
+        working-directory: terraform
+
+      - name: Terraform apply (ECR bootstrap)
+        run: terraform apply -auto-approve
+        working-directory: terraform
+        env:
+          TF_VAR_github_repo: ${{ github.repository }}
+
+      - name: Build and push authorizer image
+        env:
+          IMAGE_BASE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -f authorizer/Dockerfile \
+            -t "$IMAGE_BASE:authorizer-$IMAGE_TAG" \
+            -t "$IMAGE_BASE:authorizer-latest" \
+            .
+          docker push "$IMAGE_BASE:authorizer-$IMAGE_TAG"
+          docker push "$IMAGE_BASE:authorizer-latest"
+
+      - name: Build and push mTLS proxy image
+        env:
+          IMAGE_BASE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -f cmd/mtls/Dockerfile \
+            -t "$IMAGE_BASE:mtls-$IMAGE_TAG" \
+            -t "$IMAGE_BASE:mtls-latest" \
+            .
+          docker push "$IMAGE_BASE:mtls-$IMAGE_TAG"
+          docker push "$IMAGE_BASE:mtls-latest"
+
+      - name: Summary
+        env:
+          IMAGE_BASE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPO_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "### Published images" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| authorizer | \`authorizer-$IMAGE_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| mtls proxy | \`mtls-$IMAGE_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Set these in the consumer repo's GitHub variables:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`SHARED_SERVICES_ECR_BASE\` = \`$IMAGE_BASE\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`AUTHORIZER_IMAGE_TAG\` = \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`MTLS_PROXY_IMAGE_TAG\` = \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
