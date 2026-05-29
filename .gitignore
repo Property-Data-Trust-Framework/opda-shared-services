@@ -8,8 +8,9 @@
 *.so
 *.dylib
 
-# Named build output binaries
-mtls
+# Named build output binaries (root-level only — does not match source directories)
+/mtls
+/authorizer
 
 # Test binary, built with `go test -c`
 *.test
