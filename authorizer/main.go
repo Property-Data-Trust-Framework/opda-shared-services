@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ts-opda/opda-shared-services/authorizer/authentication"
+	"github.com/Property-Data-Trust-Framework/opda-shared-services/authorizer/authentication"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
