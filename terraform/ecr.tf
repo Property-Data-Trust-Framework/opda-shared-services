@@ -45,6 +45,25 @@ resource "aws_ecr_lifecycle_policy" "shared" {
   })
 }
 
+resource "aws_ecr_repository_policy" "shared" {
+  repository = aws_ecr_repository.shared.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "AllowLambdaPull"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+      Action = [
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+      ]
+    }]
+  })
+}
+
 output "ecr_repository_url" {
   value       = aws_ecr_repository.shared.repository_url
   description = "Set this as SHARED_SERVICES_ECR_BASE in consumer repos"
