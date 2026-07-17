@@ -443,8 +443,26 @@ func getForwardedFor(req *http.Request) string {
 	return getRemoteIP(req)
 }
 
+// tokenlessPathPrefixes are exempt from the bearer-presence check: the auth
+// stub's endpoints (/auth/token, /auth/token/introspection) are tokenless by
+// definition — they are where tokens come from (ADR-0012). Override the
+// default with a comma-separated TOKENLESS_PATH_PREFIXES env var.
+var tokenlessPathPrefixes = func() []string {
+	v := os.Getenv("TOKENLESS_PATH_PREFIXES")
+	if v == "" {
+		v = "/auth/"
+	}
+	return strings.Split(v, ",")
+}()
+
 func enforceAccessTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range tokenlessPathPrefixes {
+			if p != "" && strings.HasPrefix(r.URL.Path, p) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		accessToken := getAccessToken(r)
 		if accessToken == "" {
 			slog.Error("No Authorization header, returning 401")

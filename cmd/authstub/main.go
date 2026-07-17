@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,10 @@ import (
 // authstub is a sandbox replacement for the Raidiam directory (ADR-0012):
 // a /token endpoint minting stateless HMAC tokens for clients registered in
 // one SSM JSON parameter, and an RFC 7662 /token/introspection endpoint the
-// per-API authorizer can be pointed at via OAUTH_ISSUER. It never returns
+// per-API authorizer can be pointed at via OAUTH_ISSUER. Exposed as a private
+// API Gateway routed through the shared mTLS proxy under /auth (public Lambda
+// Function URLs need an un-IaC-able extra grant on this account — see
+// Key-Learnings). It never returns
 // `cnf`, so the authorizer's certificate binding self-disables.
 //
 // Deliberately NOT validated (sandbox-grade, see README): client_assertion
@@ -104,9 +108,9 @@ func loadConfig(ctx context.Context) (stubConfig, error) {
 	return cfg, cfgErr
 }
 
-func jsonResponse(status int, body any) events.LambdaFunctionURLResponse {
+func jsonResponse(status int, body any) events.APIGatewayProxyResponse {
 	b, _ := json.Marshal(body)
-	return events.LambdaFunctionURLResponse{
+	return events.APIGatewayProxyResponse{
 		StatusCode: status,
 		Headers: map[string]string{
 			"Content-Type":  "application/json",
@@ -116,14 +120,14 @@ func jsonResponse(status int, body any) events.LambdaFunctionURLResponse {
 	}
 }
 
-func oauthError(status int, code, description string) events.LambdaFunctionURLResponse {
+func oauthError(status int, code, description string) events.APIGatewayProxyResponse {
 	return jsonResponse(status, map[string]string{
 		"error":             code,
 		"error_description": description,
 	})
 }
 
-func parseForm(req events.LambdaFunctionURLRequest) (url.Values, error) {
+func parseForm(req events.APIGatewayProxyRequest) (url.Values, error) {
 	body := req.Body
 	if req.IsBase64Encoded {
 		raw, err := base64.StdEncoding.DecodeString(body)
@@ -135,7 +139,7 @@ func parseForm(req events.LambdaFunctionURLRequest) (url.Values, error) {
 	return url.ParseQuery(body)
 }
 
-func handleToken(ctx context.Context, c stubConfig, form url.Values, now time.Time) events.LambdaFunctionURLResponse {
+func handleToken(ctx context.Context, c stubConfig, form url.Values, now time.Time) events.APIGatewayProxyResponse {
 	if form.Get("grant_type") != "client_credentials" {
 		return oauthError(400, "unsupported_grant_type", "only client_credentials is supported")
 	}
@@ -162,7 +166,7 @@ func handleToken(ctx context.Context, c stubConfig, form url.Values, now time.Ti
 	})
 }
 
-func handleIntrospection(ctx context.Context, c stubConfig, form url.Values, now time.Time) events.LambdaFunctionURLResponse {
+func handleIntrospection(ctx context.Context, c stubConfig, form url.Values, now time.Time) events.APIGatewayProxyResponse {
 	claims, err := verifyToken(c.hmacKey, form.Get("token"), now)
 	if err != nil {
 		l.InfoContext(ctx, "introspection: inactive", slog.String("reason", err.Error()))
@@ -181,14 +185,14 @@ func handleIntrospection(ctx context.Context, c stubConfig, form url.Values, now
 	})
 }
 
-func handleRequest(ctx context.Context, req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+func handleRequest(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	c, err := loadConfig(ctx)
 	if err != nil {
 		l.ErrorContext(ctx, "config load failed", slog.String("error", err.Error()))
 		return jsonResponse(500, map[string]string{"error": "server_error"}), nil
 	}
 
-	if req.RequestContext.HTTP.Method != "POST" {
+	if req.HTTPMethod != "POST" {
 		return jsonResponse(405, map[string]string{"error": "method_not_allowed"}), nil
 	}
 
@@ -197,7 +201,9 @@ func handleRequest(ctx context.Context, req events.LambdaFunctionURLRequest) (ev
 		return oauthError(400, "invalid_request", "body must be application/x-www-form-urlencoded"), nil
 	}
 
-	switch req.RawPath {
+	// Exposed through the shared proxy under the /auth route prefix; the API
+	// Gateway resources carry the full path, so strip the prefix here.
+	switch strings.TrimPrefix(req.Path, "/auth") {
 	case "/token":
 		return handleToken(ctx, c, form, time.Now()), nil
 	case "/token/introspection":
